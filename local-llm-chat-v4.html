@@ -915,7 +915,66 @@
         .message-content {
             flex-grow: 1;
             max-width: 800px;
+            min-width: 0;
             line-height: 1.6;
+        }
+
+        .thinking-block {
+            margin: 0 0 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--bg-color);
+            overflow: hidden;
+        }
+
+        .thinking-block.is-hidden {
+            display: none;
+        }
+
+        .thinking-block summary {
+            cursor: pointer;
+            list-style: none;
+            padding: 8px 12px;
+            font-size: 13px;
+            opacity: 0.75;
+            user-select: none;
+        }
+
+        .thinking-block summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .thinking-block summary::marker {
+            content: '';
+        }
+
+        .thinking-block summary::before {
+            content: '▸';
+            display: inline-block;
+            width: 1em;
+            margin-right: 4px;
+            transition: transform 0.15s ease;
+        }
+
+        .thinking-block[open] summary::before {
+            transform: rotate(90deg);
+        }
+
+        .thinking-block.is-live summary {
+            color: var(--primary);
+            opacity: 1;
+        }
+
+        .thinking-body {
+            max-height: 16rem;
+            overflow-y: auto;
+            padding: 8px 12px 10px 2em;
+            border-top: 1px solid var(--border-color);
+            font-size: 13px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            opacity: 0.85;
         }
 
         .message-content pre {
@@ -1535,7 +1594,7 @@
                 
                 // Display chat messages (excluding system message)
                 state.messages.slice(1).forEach(msg => {
-                    appendMessageToUI(msg.role, msg.content, msg.timestamp);
+                    appendMessageToUI(msg.role, msg.content, msg.timestamp, msg.reasoning, msg.reasoningMs);
                 });
                 
                 renderChatHistory();
@@ -1814,6 +1873,9 @@
                     if (msg.role === 'user') {
                         markdown += `## User\n${msg.content}\n\n`;
                     } else {
+                        if (msg.reasoning) {
+                            markdown += `## Assistant thinking\n${msg.reasoning}\n\n`;
+                        }
                         markdown += `## Assistant\n${msg.content}\n\n`;
                     }
                 });
@@ -1835,6 +1897,9 @@
                 text += `Created: ${new Date(chat.timestamp || Date.now()).toLocaleString()}\n\n`;
                 
                 chat.messages.slice(1).forEach(msg => {
+                    if (msg.role === 'assistant' && msg.reasoning) {
+                        text += `ASSISTANT THINKING:\n${msg.reasoning}\n\n`;
+                    }
                     text += `${msg.role.toUpperCase()}:\n${msg.content}\n\n`;
                 });
                 
@@ -1883,7 +1948,7 @@
         }
 
         // Append a message to the UI
-        function appendMessageToUI(role, content, timestamp = null) {
+        function appendMessageToUI(role, content, timestamp = null, reasoning = null, reasoningMs = null) {
             if (welcomeScreen.style.display !== 'none') {
                 welcomeScreen.style.display = 'none';
             }
@@ -1899,10 +1964,31 @@
             
             const messageContent = document.createElement('div');
             messageContent.className = 'message-content markdown';
-            
-            // Convert markdown-like formatting to HTML with syntax highlighting
-            const formattedContent = formatMarkdown(content);
-            messageContent.innerHTML = formattedContent;
+
+            if (role === 'assistant') {
+                const details = document.createElement('details');
+                details.className = 'thinking-block is-hidden';
+                const summary = document.createElement('summary');
+                const label = document.createElement('span');
+                label.className = 'thinking-label';
+                label.textContent = 'Thinking';
+                summary.appendChild(label);
+                const thinkingBody = document.createElement('div');
+                thinkingBody.className = 'thinking-body';
+                details.appendChild(summary);
+                details.appendChild(thinkingBody);
+                summary.addEventListener('click', () => {
+                    messageContent.dataset.userToggledThinking = '1';
+                });
+                messageContent.appendChild(details);
+
+                const answer = document.createElement('div');
+                answer.className = 'message-body';
+                messageContent.appendChild(answer);
+            } else {
+                messageContent.innerHTML = formatMarkdown(content || '');
+                decorateCodeBlocks(messageContent);
+            }
             
             // Add timestamp
             if (timestamp || role === 'user') {
@@ -1915,25 +2001,100 @@
             messageDiv.appendChild(avatar);
             messageDiv.appendChild(messageContent);
             chatContainer.appendChild(messageDiv);
+
+            if (role === 'assistant') {
+                updateAssistantMessage(messageContent, content || '', reasoning || '', {
+                    live: false,
+                    reasoningMs: reasoningMs
+                });
+            }
             
-            // Apply syntax highlighting
-            messageDiv.querySelectorAll('pre code').forEach((block) => {
-                Prism.highlightElement(block);
+            // Scroll to the bottom of the chat
+            if (state.autoScroll) {
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+
+            return messageDiv;
+        }
+
+        function setDetailsOpen(details, open) {
+            details.open = open;
+        }
+
+        function thinkingLabel(ms, live, hasAnswer) {
+            if (live && !hasAnswer) return 'Thinking...';
+            if (typeof ms === 'number' && ms >= 100) {
+                const seconds = ms / 1000;
+                const shown = seconds < 10 ? seconds.toFixed(1) : String(Math.round(seconds));
+                return 'Thought for ' + shown + 's';
+            }
+            return 'Thought';
+        }
+
+        function updateAssistantMessage(messageContent, content, reasoning, options = {}) {
+            const live = !!options.live;
+            const updateAnswer = options.updateAnswer !== false;
+            const details = messageContent.querySelector('.thinking-block');
+            const thinkingBody = messageContent.querySelector('.thinking-body');
+            const label = messageContent.querySelector('.thinking-label');
+            const answer = messageContent.querySelector('.message-body');
+            const thought = reasoning || '';
+            const hasThought = thought.trim().length > 0;
+            const hasAnswer = !!(content && content.trim());
+
+            if (details && thinkingBody && label) {
+                details.classList.toggle('is-hidden', !hasThought);
+                details.classList.toggle('is-live', live && hasThought && !hasAnswer);
+                if (hasThought) {
+                    thinkingBody.textContent = thought;
+                    if (live && !messageContent.dataset.thinkStart) {
+                        messageContent.dataset.thinkStart = String(Date.now());
+                    }
+                    let ms = null;
+                    if (typeof options.reasoningMs === 'number') ms = options.reasoningMs;
+                    else if (messageContent.dataset.thinkStart) ms = Date.now() - Number(messageContent.dataset.thinkStart);
+                    label.textContent = thinkingLabel(ms, live, hasAnswer);
+                    if (messageContent.dataset.userToggledThinking !== '1') {
+                        setDetailsOpen(details, !hasAnswer);
+                    }
+                    if (live && details.open) {
+                        const nearBottom = thinkingBody.scrollHeight - thinkingBody.scrollTop - thinkingBody.clientHeight < 40;
+                        if (nearBottom) thinkingBody.scrollTop = thinkingBody.scrollHeight;
+                    }
+                } else {
+                    setDetailsOpen(details, false);
+                    thinkingBody.textContent = '';
+                }
+            }
+
+            if (answer && updateAnswer) {
+                answer.innerHTML = formatMarkdown(content || '');
+                decorateCodeBlocks(answer);
+            }
+        }
+
+        function decorateCodeBlocks(container) {
+            container.querySelectorAll('pre code').forEach((block) => {
+                if (block.classList.contains('highlighted')) return;
+                if (window.Prism) {
+                    Prism.highlightElement(block);
+                }
+                block.classList.add('highlighted');
             });
-            
-            // Add copy buttons to code blocks
-            messageDiv.querySelectorAll('pre').forEach((pre) => {
+
+            container.querySelectorAll('pre').forEach((pre) => {
+                if (pre.querySelector('.code-header')) return;
                 const code = pre.querySelector('code');
                 if (!code) return;
-                
+
                 const language = code.className.replace('language-', '') || 'text';
                 const header = document.createElement('div');
                 header.className = 'code-header';
-                
+
                 const langLabel = document.createElement('span');
                 langLabel.className = 'code-language';
                 langLabel.textContent = language;
-                
+
                 const copyBtn = document.createElement('button');
                 copyBtn.className = 'copy-button';
                 copyBtn.textContent = 'Copy';
@@ -1947,16 +2108,11 @@
                         }, 2000);
                     });
                 };
-                
+
                 header.appendChild(langLabel);
                 header.appendChild(copyBtn);
                 pre.insertBefore(header, code);
             });
-            
-            // Scroll to the bottom of the chat
-            if (state.autoScroll) {
-                chatContainer.scrollTop = chatContainer.scrollHeight;
-            }
         }
 
         // Add typing indicator
@@ -2073,16 +2229,313 @@
                 .replace(/'/g, "&#039;");
         }
 
+        // Chat-completions payloads only. Timestamps stay in local history.
+        // reasoning_content is sent back so llama.cpp / DeepSeek-style templates
+        // can keep the chain of thought on the next turn.
+        function messagesForApi(messages = state.messages) {
+            return messages.reduce((out, msg) => {
+                if (!msg || !msg.role || typeof msg.content !== 'string') return out;
+                const reasoning = typeof msg.reasoning === 'string' ? msg.reasoning : '';
+                if (msg.role === 'assistant' && msg.content.trim() === '' && reasoning.trim() === '') return out;
+                const entry = { role: msg.role, content: msg.content };
+                if (msg.role === 'assistant' && reasoning.trim()) {
+                    entry.reasoning_content = reasoning;
+                }
+                out.push(entry);
+                return out;
+            }, []);
+        }
+
+        function rememberAssistant(content, reasoning, timestamp, reasoningMs) {
+            const assistantMsg = {
+                role: 'assistant',
+                content: content,
+                timestamp: timestamp
+            };
+            if (reasoning && reasoning.trim()) {
+                assistantMsg.reasoning = reasoning;
+                if (typeof reasoningMs === 'number') assistantMsg.reasoningMs = reasoningMs;
+            }
+            state.messages.push(assistantMsg);
+            const chatIndex = state.chatHistory.findIndex(chat => chat.id === state.currentChatId);
+            if (chatIndex !== -1) {
+                state.chatHistory[chatIndex].messages = state.messages.map(msg => ({ ...msg }));
+                saveChatHistory();
+            }
+        }
+
+        function findEarliest(text, tags) {
+            let best = null;
+            tags.forEach(tag => {
+                const index = text.indexOf(tag);
+                if (index === -1) return;
+                if (!best || index < best.index || (index === best.index && tag.length > best.tag.length)) {
+                    best = { index: index, tag: tag };
+                }
+            });
+            return best;
+        }
+
+        function partialTagSuffix(text, tags) {
+            const max = tags.reduce((n, tag) => Math.max(n, tag.length), 0) - 1;
+            if (max <= 0 || !text) return '';
+            const start = Math.max(0, text.length - max);
+            for (let i = start; i < text.length; i++) {
+                const suffix = text.slice(i);
+                if (tags.some(tag => tag.startsWith(suffix))) return suffix;
+            }
+            return '';
+        }
+
+        // Pull <think> / <thinking> blocks out of streamed content, including tags
+        // split across chunks. Tags inside ``` fences stay in the answer.
+        function createThinkSplitter() {
+            const OPEN = ['<thinking>', '<think>'];
+            const CLOSE = ['</thinking>', '</think>'];
+            const FENCE = '```';
+            let mode = 'answer';
+            let carry = '';
+            let lead = true;
+            let leadHold = '';
+            let answerCommitted = false;
+            let thinkBuf = '';
+            let openTag = '';
+
+            function feed(chunk) {
+                let thinking = '';
+                let answer = '';
+                let text = carry + (chunk || '');
+                carry = '';
+
+                // Whitespace before an opening think tag is not part of the answer.
+                // Hold it until the next chunk shows real answer text.
+                function emitAnswer(piece) {
+                    if (!piece) return;
+                    if (!lead) {
+                        answer += piece;
+                        if (piece.trim()) answerCommitted = true;
+                        return;
+                    }
+                    leadHold += piece;
+                    for (let i = 0; i < leadHold.length; i++) {
+                        if (!/\s/.test(leadHold[i])) {
+                            answer += leadHold;
+                            leadHold = '';
+                            lead = false;
+                            answerCommitted = true;
+                            return;
+                        }
+                    }
+                }
+
+                while (text.length) {
+                    if (mode === 'think') {
+                        const close = findEarliest(text, CLOSE);
+                        if (!close) {
+                            const partial = partialTagSuffix(text, CLOSE);
+                            const chunkText = text.slice(0, text.length - partial.length);
+                            carry = partial;
+                            // A think block that starts the reply streams live. One that
+                            // opens after real answer text is held until it closes, so a
+                            // literal "<think>" in the answer is not swallowed if it never closes.
+                            if (!answerCommitted) {
+                                thinking += thinkBuf + chunkText;
+                                thinkBuf = '';
+                            } else {
+                                thinkBuf += chunkText;
+                            }
+                            break;
+                        }
+                        thinking += thinkBuf + text.slice(0, close.index);
+                        thinkBuf = '';
+                        openTag = '';
+                        text = text.slice(close.index + close.tag.length);
+                        mode = 'answer';
+                        continue;
+                    }
+
+                    if (mode === 'fence') {
+                        const fenceAt = text.indexOf(FENCE);
+                        if (fenceAt === -1) {
+                            const partial = partialTagSuffix(text, [FENCE]);
+                            emitAnswer(text.slice(0, text.length - partial.length));
+                            carry = partial;
+                            break;
+                        }
+                        emitAnswer(text.slice(0, fenceAt + FENCE.length));
+                        text = text.slice(fenceAt + FENCE.length);
+                        mode = 'answer';
+                        continue;
+                    }
+
+                    const open = findEarliest(text, OPEN);
+                    const fenceAt = text.indexOf(FENCE);
+                    let marker = null;
+                    if (open && (fenceAt === -1 || open.index < fenceAt)) {
+                        marker = { kind: 'open', index: open.index, tag: open.tag };
+                    } else if (fenceAt !== -1) {
+                        marker = { kind: 'fence', index: fenceAt, tag: FENCE };
+                    }
+
+                    if (!marker) {
+                        const partial = partialTagSuffix(text, OPEN.concat([FENCE]));
+                        emitAnswer(text.slice(0, text.length - partial.length));
+                        carry = partial;
+                        break;
+                    }
+
+                    if (marker.kind === 'fence') {
+                        emitAnswer(text.slice(0, marker.index + marker.tag.length));
+                        text = text.slice(marker.index + marker.tag.length);
+                        mode = 'fence';
+                    } else {
+                        emitAnswer(text.slice(0, marker.index));
+                        leadHold = '';
+                        lead = false;
+                        openTag = marker.tag;
+                        text = text.slice(marker.index + marker.tag.length);
+                        mode = 'think';
+                    }
+                }
+
+                return { thinking: thinking, answer: answer };
+            }
+
+            function flush() {
+                const rest = carry;
+                carry = '';
+                let thinking = '';
+                let answer = '';
+                if (mode === 'think') {
+                    const pending = thinkBuf + rest;
+                    thinkBuf = '';
+                    if (answerCommitted) {
+                        answer += openTag + pending;
+                        openTag = '';
+                        mode = 'answer';
+                    } else {
+                        thinking += pending;
+                    }
+                } else {
+                    answer += rest;
+                }
+                if (leadHold) {
+                    answer = leadHold + answer;
+                    leadHold = '';
+                    lead = false;
+                }
+                return { thinking: thinking, answer: answer };
+            }
+
+            return { feed: feed, flush: flush };
+        }
+
+        function readReasoningDelta(delta) {
+            if (!delta || typeof delta !== 'object') return '';
+
+            const direct = [delta.reasoning_content, delta.thinking]
+                .find(value => typeof value === 'string' && value);
+            if (direct) return direct;
+
+            if (typeof delta.reasoning === 'string' && delta.reasoning) return delta.reasoning;
+            if (delta.reasoning && typeof delta.reasoning === 'object') {
+                const summary = delta.reasoning.summary;
+                if (typeof summary === 'string' && summary) return summary;
+                if (Array.isArray(summary)) {
+                    const text = summary.map(part => {
+                        if (typeof part === 'string') return part;
+                        if (part && typeof part.text === 'string') return part.text;
+                        return '';
+                    }).join('');
+                    if (text) return text;
+                }
+            }
+
+            if (Array.isArray(delta.reasoning_details)) {
+                return delta.reasoning_details.map(part => {
+                    if (typeof part === 'string') return part;
+                    if (!part || typeof part !== 'object') return '';
+                    if (typeof part.text === 'string') return part.text;
+                    if (typeof part.summary === 'string') return part.summary;
+                    return '';
+                }).join('');
+            }
+
+            return '';
+        }
+
+        function splitContentParts(content) {
+            if (typeof content === 'string') return { content: content, reasoning: '' };
+            if (!Array.isArray(content)) return { content: '', reasoning: '' };
+            let text = '';
+            let reasoning = '';
+            content.forEach(part => {
+                if (typeof part === 'string') {
+                    text += part;
+                    return;
+                }
+                if (!part || typeof part !== 'object') return;
+                const type = part.type || '';
+                const value = typeof part.text === 'string' ? part.text
+                    : (typeof part.content === 'string' ? part.content : '');
+                if (type === 'reasoning' || type === 'thinking' || type === 'reasoning_text') reasoning += value;
+                else text += value;
+            });
+            return { content: text, reasoning: reasoning };
+        }
+
+        function createStreamAssembler() {
+            const splitter = createThinkSplitter();
+            let content = '';
+            let reasoning = '';
+            let separated = false;
+            let sawFieldReasoning = false;
+
+            function noteField(text) {
+                if (!text) return;
+                sawFieldReasoning = true;
+                separated = true;
+                reasoning += text;
+            }
+
+            function pushDelta(delta) {
+                noteField(readReasoningDelta(delta));
+                const parts = splitContentParts(delta && delta.content);
+                noteField(parts.reasoning);
+                const split = splitter.feed(parts.content);
+                if (split.thinking) {
+                    separated = true;
+                    if (!sawFieldReasoning) reasoning += split.thinking;
+                }
+                content += split.answer;
+            }
+
+            function snapshot() {
+                return {
+                    content: separated ? content.replace(/^\s+/, '') : content,
+                    reasoning: reasoning.replace(/^\n+/, '')
+                };
+            }
+
+            function finish() {
+                const tail = splitter.flush();
+                if (tail.thinking) {
+                    separated = true;
+                    if (!sawFieldReasoning) reasoning += tail.thinking;
+                }
+                content += tail.answer;
+                if (separated) content = content.replace(/^\s+/, '');
+                reasoning = reasoning.trim();
+                return { content: content, reasoning: reasoning };
+            }
+
+            return { pushDelta: pushDelta, snapshot: snapshot, finish: finish };
+        }
+
         // Stop generation
         function stopGeneration() {
             if (state.abortController) {
                 state.abortController.abort();
-                state.isGenerating = false;
-                stopButton.classList.remove('active');
-                sendButton.disabled = userInput.value.trim() === '';
-                removeTypingIndicator();
-                appendMessageToUI('assistant', 'Generation stopped by user.');
-                logDebug('Generation stopped', 'User aborted generation', 'info');
             }
         }
 
@@ -2122,11 +2575,21 @@
             state.isGenerating = true;
             state.abortController = new AbortController();
             
+            const assembler = createStreamAssembler();
+            const seenDeltaKeys = new Set();
+            let aiMessageContent = null;
+            let aiTimestamp = null;
+
+            function reasoningDuration() {
+                if (!aiMessageContent || !aiMessageContent.dataset.thinkStart) return null;
+                return Date.now() - Number(aiMessageContent.dataset.thinkStart);
+            }
+
             try {
                 // Prepare the API request
                 const requestBody = {
                     model: CONFIG.model,
-                    messages: state.messages,
+                    messages: messagesForApi(),
                     stream: true,
                     temperature: CONFIG.temperature,
                     max_tokens: CONFIG.maxTokens
@@ -2145,18 +2608,18 @@
                 });
                 
                 if (!response.ok) {
-                    throw new Error(`API error: ${response.status}`);
+                    let detail = '';
+                    try { detail = await response.text(); } catch (e) { /* body already consumed or empty */ }
+                    throw new Error('API error: ' + response.status + (detail ? ' ' + detail.slice(0, 300) : ''));
                 }
                 
                 // Remove typing indicator and prepare for streaming response
                 removeTypingIndicator();
                 
                 // Create container for AI message
-                const aiTimestamp = new Date().toISOString();
-                appendMessageToUI('assistant', '', aiTimestamp);
-                const aiMessageElement = chatContainer.lastChild.querySelector('.message-content');
-                
-                let fullResponse = '';
+                aiTimestamp = new Date().toISOString();
+                const aiMessage = appendMessageToUI('assistant', '', aiTimestamp);
+                aiMessageContent = aiMessage.querySelector('.message-content');
                 
                 // Process the stream
                 const reader = response.body.getReader();
@@ -2166,9 +2629,12 @@
                 
                 while (true) {
                     const { done, value } = await reader.read();
-                    if (done) break;
-                    
-                    buffer += decoder.decode(value, { stream: true });
+                    if (done) {
+                        buffer += decoder.decode();
+                        if (buffer.trim()) buffer += '\n';
+                    } else {
+                        buffer += decoder.decode(value, { stream: true });
+                    }
                     
                     // Process complete JSON objects in the buffer
                     let lastJSONEnd = 0;
@@ -2177,70 +2643,104 @@
                         const lineEnd = buffer.indexOf('\n', lastJSONEnd);
                         const line = buffer.substring(lastJSONEnd, lineEnd).trim();
                         lastJSONEnd = lineEnd + 1;
-                        
-                        if (line.startsWith('data: ')) {
-                            const jsonStr = line.slice(6);
-                            
-                            if (jsonStr === '[DONE]') continue;
-                            
-                            try {
-                                const json = JSON.parse(jsonStr);
-                                
-                                const content = json.choices?.[0]?.delta?.content || '';
-                                if (content) {
-                                    fullResponse += content;
-                                    
-                                    // Update the UI with the new content
-                                    aiMessageElement.innerHTML = formatMarkdown(fullResponse);
-                                    
-                                    // Apply syntax highlighting to new code blocks
-                                    aiMessageElement.querySelectorAll('pre code').forEach((block) => {
-                                        if (!block.classList.contains('highlighted')) {
-                                            Prism.highlightElement(block);
-                                            block.classList.add('highlighted');
-                                        }
-                                    });
-                                    
-                                    // Scroll to the bottom
-                                    if (state.autoScroll) {
-                                        chatContainer.scrollTop = chatContainer.scrollHeight;
-                                    }
-                                }
-                            } catch (e) {
-                                console.error('Error parsing JSON from stream:', e);
-                                logDebug('Parse error', e.message, 'error');
+
+                        let jsonStr = '';
+                        if (line.startsWith('data:')) {
+                            jsonStr = line.slice(5).trim();
+                        } else if (line.startsWith('{')) {
+                            jsonStr = line;
+                        } else {
+                            continue;
+                        }
+
+                        if (!jsonStr || jsonStr === '[DONE]') continue;
+
+                        try {
+                            const json = JSON.parse(jsonStr);
+                            if (json.error) {
+                                const message = typeof json.error === 'string'
+                                    ? json.error
+                                    : (json.error.message || JSON.stringify(json.error));
+                                const serverError = new Error(message);
+                                serverError.serverError = true;
+                                throw serverError;
                             }
+
+                            const delta = json.choices?.[0]?.delta;
+                            if (delta && typeof delta === 'object') {
+                                Object.keys(delta).forEach(key => seenDeltaKeys.add(key));
+                            }
+                            const before = assembler.snapshot();
+                            assembler.pushDelta(delta);
+                            const after = assembler.snapshot();
+                            if (after.content === before.content && after.reasoning === before.reasoning) continue;
+
+                            updateAssistantMessage(aiMessageContent, after.content, after.reasoning, {
+                                live: true,
+                                updateAnswer: after.content !== before.content
+                            });
+
+                            if (state.autoScroll) {
+                                chatContainer.scrollTop = chatContainer.scrollHeight;
+                            }
+                        } catch (e) {
+                            if (e.serverError) throw e;
+                            console.error('Error parsing JSON from stream:', e);
+                            logDebug('Parse error', e.message, 'error');
                         }
                     }
                     
                     buffer = buffer.substring(lastJSONEnd);
+                    if (done) break;
                 }
-                
-                // Add AI response to state
-                state.messages.push({
-                    role: 'assistant',
-                    content: fullResponse,
-                    timestamp: aiTimestamp
+
+                const finalReply = assembler.finish();
+                const reasoningMs = reasoningDuration();
+                updateAssistantMessage(aiMessageContent, finalReply.content, finalReply.reasoning, {
+                    live: false,
+                    reasoningMs: reasoningMs
                 });
-                
-                // Update chat in history
-                const updatedChatIndex = state.chatHistory.findIndex(chat => chat.id === state.currentChatId);
-                if (updatedChatIndex !== -1) {
-                    state.chatHistory[updatedChatIndex].messages = [...state.messages];
-                    saveChatHistory();
-                }
-                
-                logDebug('API Response', fullResponse, 'response');
+                rememberAssistant(finalReply.content, finalReply.reasoning, aiTimestamp, reasoningMs);
+
+                logDebug('API Response', { ...finalReply, deltaKeys: [...seenDeltaKeys] }, 'response');
                 
             } catch (error) {
                 if (error.name === 'AbortError') {
-                    console.log('Request was aborted');
+                    removeTypingIndicator();
+                    const finalReply = assembler.finish();
+                    const reasoningMs = reasoningDuration();
+                    if (aiMessageContent && (finalReply.content || finalReply.reasoning)) {
+                        updateAssistantMessage(aiMessageContent, finalReply.content, finalReply.reasoning, {
+                            live: false,
+                            reasoningMs: reasoningMs
+                        });
+                        rememberAssistant(finalReply.content, finalReply.reasoning, aiTimestamp, reasoningMs);
+                    } else if (aiMessageContent) {
+                        updateAssistantMessage(aiMessageContent, 'Generation stopped by user.', '', { live: false });
+                    } else {
+                        appendMessageToUI('assistant', 'Generation stopped by user.');
+                    }
+                    logDebug('Generation stopped', { ...finalReply, deltaKeys: [...seenDeltaKeys] }, 'info');
                     return;
                 }
                 
                 console.error('Error sending message:', error);
                 removeTypingIndicator();
-                appendMessageToUI('assistant', 'Sorry, there was an error communicating with the API. Please check your connection and API settings.');
+                if (aiMessageContent) {
+                    const partial = assembler.finish();
+                    if (partial.content || partial.reasoning) {
+                        const reasoningMs = reasoningDuration();
+                        updateAssistantMessage(aiMessageContent, partial.content, partial.reasoning, {
+                            live: false,
+                            reasoningMs: reasoningMs
+                        });
+                        rememberAssistant(partial.content, partial.reasoning, aiTimestamp, reasoningMs);
+                    } else {
+                        const row = aiMessageContent.closest('.message');
+                        if (row) row.remove();
+                    }
+                }
+                appendMessageToUI('assistant', 'Sorry, there was an error communicating with the API. Please check your connection and API settings.\n\n' + escapeHtml(error.message || ''));
                 logDebug('API Error', error.message, 'error');
             } finally {
                 state.isGenerating = false;
